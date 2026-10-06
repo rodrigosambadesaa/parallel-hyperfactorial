@@ -5,6 +5,8 @@ import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Scanner;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.RecursiveTask;
@@ -29,6 +31,8 @@ public final class ParallelHyperfactorial {
     private static final BigInteger INT_MAX = BigInteger.valueOf(Integer.MAX_VALUE);
 
     private static final int SMALL_INPUT_LIMIT = 100;
+    private static final int NATIVE_THRESHOLD = 1_000;
+    private static final int DECIMAL_FILE_THRESHOLD = 5_000;
     private static final int PRIME_LEAF_SIZE = 16;
     private static final BigInteger BIG_RANGE_LEAF_SIZE = BigInteger.valueOf(8);
     private static final int OUTPUT_WIDTH = 80;
@@ -46,9 +50,17 @@ public final class ParallelHyperfactorial {
      * @param args command-line arguments; currently unused
      * @throws IOException if writing the result fails
      */
-    public static void main(String[] args) throws IOException {
-        System.out.println("=== EXACT PARALLEL HYPERFACTORIAL ===");
+    public static void main(String[] args) throws IOException, InterruptedException {
+        if (args.length >= 2) {
+            BigInteger number = new BigInteger(args[0]);
+            DecimalFileResult result = writeDecimalHyperfactorial(number, Path.of(args[1]));
+            printFileResult(args[1], result);
+            return;
+        }
+
+        System.out.println("=== EXACT HIGH-PERFORMANCE HYPERFACTORIAL ===");
         System.out.println("H(n) = 1^1 × 2^2 × ... × n^n");
+        System.out.println("FLINT/GMP native backend with a pure-Java prime fallback");
         System.out.println("Type q to quit.");
 
         BufferedWriter output = new BufferedWriter(
@@ -80,6 +92,17 @@ public final class ParallelHyperfactorial {
                 }
 
                 try {
+                    validateArgument(number);
+                    if (number.compareTo(BigInteger.valueOf(DECIMAL_FILE_THRESHOLD)) >= 0
+                            && number.compareTo(INT_MAX) <= 0
+                            && NativeHyperfactorial.isAvailable()) {
+                        Path destination = Path.of("hyperfactorial-" + number + ".txt");
+                        DecimalFileResult fileResult =
+                                writeDecimalHyperfactorial(number, destination);
+                        printFileResult(destination.toString(), fileResult);
+                        continue;
+                    }
+
                     long calculationStart = System.nanoTime();
                     BigInteger result = hyperfactorial(number);
                     long calculationEnd = System.nanoTime();
@@ -118,6 +141,10 @@ public final class ParallelHyperfactorial {
                     System.out.println("Number of digits: " + decimalResult.length());
                 } catch (IllegalArgumentException e) {
                     System.out.println("Error: " + e.getMessage());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    System.err.println("Hyperfactorial calculation interrupted.");
+                    return;
                 } catch (ArithmeticException e) {
                     System.err.println("Error: the requested result exceeds a JVM arithmetic limit.");
                 } catch (OutOfMemoryError e) {
@@ -148,10 +175,49 @@ public final class ParallelHyperfactorial {
         }
 
         if (n.compareTo(INT_MAX) <= 0) {
-            return hyperfactorialByPrimes(n.intValueExact());
+            int value = n.intValueExact();
+            if (value >= NATIVE_THRESHOLD && NativeHyperfactorial.isAvailable()) {
+                try {
+                    return NativeHyperfactorial.calculate(value).value();
+                } catch (IOException exception) {
+                    // Keep the exact pure-Java implementation as a fallback.
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(
+                            "Native hyperfactorial was interrupted", exception);
+                }
+            }
+            return hyperfactorialByPrimes(value);
         }
 
         return POOL.invoke(new BigRangeHyperfactorialTask(TWO, n));
+    }
+
+    /** Writes the exact decimal result directly, avoiding BigInteger.toString(). */
+    public static DecimalFileResult writeDecimalHyperfactorial(BigInteger n, Path output)
+            throws IOException, InterruptedException {
+        validateArgument(n);
+        if (n.compareTo(INT_MAX) <= 0 && NativeHyperfactorial.isAvailable()) {
+            NativeHyperfactorial.DecimalFileResult result =
+                    NativeHyperfactorial.writeDecimal(n.intValueExact(), output);
+            return new DecimalFileResult("FLINT/GMP", result.digits(), result.bitLength(),
+                    result.calculationSeconds(), result.conversionSeconds(),
+                    result.writeSeconds(), result.sha256());
+        }
+
+        long calculationStart = System.nanoTime();
+        BigInteger value = hyperfactorial(n);
+        long calculationEnd = System.nanoTime();
+        long conversionStart = System.nanoTime();
+        String decimal = value.toString();
+        long conversionEnd = System.nanoTime();
+        long writeStart = System.nanoTime();
+        Files.writeString(output, decimal, StandardCharsets.US_ASCII);
+        long writeEnd = System.nanoTime();
+        return new DecimalFileResult("Java BigInteger", decimal.length(), value.bitLength(),
+                nanosToSeconds(calculationEnd - calculationStart),
+                nanosToSeconds(conversionEnd - conversionStart),
+                nanosToSeconds(writeEnd - writeStart), "not-calculated");
     }
 
     private static void validateArgument(BigInteger n) {
@@ -486,4 +552,22 @@ public final class ParallelHyperfactorial {
     private static double nanosToSeconds(long nanoseconds) {
         return nanoseconds / 1_000_000_000.0;
     }
+
+    private static void printFileResult(String output, DecimalFileResult result) {
+        System.out.println("Result written to " + Path.of(output).toAbsolutePath());
+        System.out.println("Backend: " + result.backend());
+        System.out.printf("Calculation time: %.3f s%n", result.calculationSeconds());
+        System.out.printf("Decimal conversion time: %.3f s%n", result.conversionSeconds());
+        System.out.printf("File write time: %.3f s%n", result.writeSeconds());
+        System.out.println("Number of digits: " + result.digits());
+        System.out.println("Bit length: " + result.bitLength());
+        System.out.println("SHA-256: " + result.sha256());
+    }
+
+    /** Timings and integrity data for direct decimal-file output. */
+    public record DecimalFileResult(String backend, long digits, long bitLength,
+                                    double calculationSeconds, double conversionSeconds,
+                                    double writeSeconds, String sha256) {
+    }
 }
+

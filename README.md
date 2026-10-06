@@ -1,110 +1,95 @@
 # Parallel Hyperfactorial
 
-Java 17 calculator providing two complementary hyperfactorial implementations:
-
-- an exact `BigInteger` implementation for non-negative integers;
-- an arbitrary-precision analytic continuation for real and complex decimal arguments.
-
-For a non-negative integer `n`:
+Proyecto Java 17/Eclipse para calcular:
 
 ```text
-H(n) = 1^1 × 2^2 × 3^3 × ... × n^n
+H(n) = 1^1 × 2^2 × ... × n^n
 ```
 
-## Exact integer implementation
+Incluye un motor entero exacto FLINT/GMP con respaldo Java puro y una continuación
+compleja con precisión arbitraria certificada mediante FLINT/Arb.
 
-The integer API accepts and returns `BigInteger`:
+## Enteros exactos: FLINT/GMP
+
+El motor factoriza implícitamente el resultado. Para cada primo calcula:
+
+```text
+v_p(H(n)) = Σ(j≥1) p^j q(q+1)/2,  q = floor(n/p^j)
+```
+
+Después eleva cada primo a su exponente exacto y usa un árbol de producto que
+combina primero operandos de tamaño parecido. FLINT/GMP ejecuta las potencias y
+multiplicaciones gigantes. Sin el backend nativo sigue disponible la criba y el
+árbol ponderado Java con `BigInteger` y `ForkJoinPool`.
+
+API:
 
 ```java
-BigInteger result = ParallelHyperfactorial.hyperfactorial(n);
+BigInteger value = ParallelHyperfactorial.hyperfactorial(n);
 ```
 
-For practical inputs, it factors the result into prime powers and multiplies them through a weight-balanced parallel product tree using `ForkJoinPool`. Inputs greater than `Integer.MAX_VALUE` use an exact divide-and-conquer fallback whose boundaries and exponents remain `BigInteger`.
+Salida decimal directa para resultados gigantes:
 
-Run:
+```bash
+java -cp target/classes programas.ParallelHyperfactorial 10000 hyperfactorial-10000.txt
+```
+
+El archivo temporal se valida por longitud y SHA-256 antes de moverlo de forma
+atómica al destino. Esto evita la costosa ruta `BigInteger.toString()`.
+
+## Complejos certificados
+
+La rama principal usada es:
 
 ```text
-programas.ParallelHyperfactorial
+H(z) = exp(z log Γ(z+1) - log G(z+1))
 ```
 
-## Arbitrary-precision complex implementation
-
-For non-integer and complex arguments, the program evaluates the principal analytic continuation:
-
-```text
-H(z) = exp(z LogGamma(z + 1) - LogBarnesG(z + 1))
-```
-
-The API receives a `BigComplex` and an explicit decimal precision:
+Los decimales de entrada se convierten directamente a racionales exactos. Arb
+evalúa `log Γ` y `log G` con aritmética de bolas complejas; el programa acepta
+los dígitos únicamente cuando el intervalo completo determina un redondeo único.
 
 ```java
-MathContext context = new MathContext(200, RoundingMode.HALF_EVEN);
-BigComplex z = BigComplex.valueOf(
-        BigDecimal.ZERO,
-        BigDecimalMath.toBigDecimal("1.111111111111111111111111111111111111111")
-);
-
-BigComplex result = ComplexHyperfactorial.hyperfactorial(z, context);
+ComplexHyperfactorial.CertifiedResult result =
+        ComplexHyperfactorial.hyperfactorial(
+                "1.111111111111111111111111111111111111111i", 100_000L);
 ```
 
-Run:
+```bash
+java -cp target/classes programas.ComplexHyperfactorial \
+  1.111111111111111111111111111111111111111i \
+  100000 hyperfactorial-complex-100000.txt
+```
+
+Los primeros dígitos verificados son:
 
 ```text
-programas.ComplexHyperfactorial
+0.4895316414038854964227133800163145564815682084020001845705183197379803...
+-0.4845344786538150886184160408749807311323448759130317674788257762254994... i
 ```
 
-Accepted console formats include:
+No existe un techo artificial pequeño de precisión: se recibe un `long` y se
+devuelven cadenas decimales. Los límites efectivos son los recursos disponibles y
+los tamaños máximos de las estructuras de Java/Python/FLINT.
 
-```text
-3.5
-2i
--i
-3.5+2.25i
-3.5-2.25i
-1e-20+2e-5i
+## Instalación y Eclipse
+
+Requisitos: Java 17, Maven, Python 3 y Eclipse con m2e.
+
+```bash
+python3 -m pip install -r requirements.txt
+mvn verify
 ```
 
-The parser never converts through `double`. Very long decimal components are read with `BigDecimalMath.toBigDecimal(String)`.
+En Eclipse: **File → Import → Maven → Existing Maven Projects** y seleccionar este
+repositorio. Si el Python deseado no se llama `python3` o `python`, definir
+`PYTHON`.
 
-### Example
+`requirements.txt` fija `python-flint==0.8.0`. Los hilos nativos se controlan
+con `HYPERFACTORIAL_THREADS`.
 
-For 200 significant digits:
+## Verificación
 
-```text
-H(1.111111111111111111111111111111111111111i) =
-0.48953164140388549642271338001631455648156820840200018457051831973798032005078357064287005130067287470691848458563061842894420386596879117766030697718759288253611838518905480450134244450392430832175896
-- 0.48453447865381508861841604087498073113234487591303176747882577622549949699957175495978017639802409544769945663542822185300101531099139000616884728805548544543671218079878445324613099798002181206731225 i
-```
-
-### Numerical method
-
-- `BigComplex`, elementary complex functions and arbitrary-precision decimal operations come from `ch.obermuhlner:big-math:2.3.2`.
-- `LogGamma` is evaluated using recurrence and Stirling's asymptotic expansion.
-- `LogBarnesG` is evaluated through its functional equation and asymptotic expansion.
-- Bernoulli numbers use an incremental Akiyama-Tanigawa cache with an extended internal `MathContext`.
-- The Kinkelin constant `zeta'(-1)` is calculated dynamically with Euler-Maclaurin summation instead of being stored with a fixed number of digits.
-
-## Requirements
-
-- Java 17 or newer
-- Eclipse IDE with Java Development Tools and Maven Integration for Eclipse (`m2e`)
-- Maven, when building outside Eclipse
-
-The external dependency is declared in `pom.xml` and downloaded from Maven Central.
-
-## Import into Eclipse
-
-1. Open **File → Import**.
-2. Select **Maven → Existing Maven Projects**.
-3. Select the cloned repository as the root directory.
-4. Choose `parallel-hyperfactorial` and finish the import.
-5. If necessary, select **Maven → Update Project** from the project's context menu.
-6. Run either main class as a Java application.
-
-## Precision and practical limits
-
-“Arbitrary precision” means that the caller chooses a finite number of significant decimal digits. A transcendental complex result generally has infinitely many non-repeating digits, so no program can return all of them.
-
-Input length and requested precision are not restricted to `double`, `int` or `long` numeric ranges, but Java ultimately remains limited by available memory, execution time, `BigDecimal` scale and array-size limits. Increasing the requested precision also increases the number of asymptotic terms and the cost of the elementary complex operations.
-
-The exact integer hyperfactorial grows even faster: `H(1,000)` already has roughly 1.39 million decimal digits, while `H(1,000,000)` would have roughly 2.89 trillion digits.
+Las pruebas comparan los resultados nativos con referencias Java exactas, verifican
+los archivos por SHA-256 y comprueban el ejemplo complejo conocido. GitHub Actions
+instala FLINT y ejecuta `mvn verify` en cada cambio.
